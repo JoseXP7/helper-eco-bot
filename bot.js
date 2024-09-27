@@ -4,6 +4,17 @@ const supabaseUrl = process.env.SUPABASE_URL
 const supabaseKey = process.env.SUPABASE_API_KEY
 const supabase = createClient(supabaseUrl, supabaseKey)
 const { Telegraf } = require('telegraf')
+const express = require('express')
+const app = express()
+
+app.get('/', (req, res) => {
+  res.send('Bot GEMA en Producción')
+})
+
+const port = 3000
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}`)
+})
 
 const tokenBot = process.env.TELEGRAM_TOKEN
 
@@ -97,3 +108,4 @@ bot.on('text', async (ctx) => {
 })
 
 bot.launch()
+module.exports = app
