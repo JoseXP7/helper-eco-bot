@@ -1,9 +1,14 @@
 require('dotenv').config()
 const { Telegraf } = require('telegraf')
+const { Markup } = require('telegraf')
+const { createClient } = require('@supabase/supabase-js')
 const express = require('express')
-const fs = require('fs')
-const DATA_FILE = 'bot_data.json'
 const app = express()
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
+)
 
 app.get('/', (req, res) => {
   res.send('Bot en línea')
@@ -15,35 +20,83 @@ app.listen(port, () => {
 })
 
 const tokenBot = process.env.TELEGRAM_TOKEN
-
 const bot = new Telegraf(tokenBot)
+
+// --- NUEVAS FUNCIONES SUPABASE ---
+
+// Guardar o actualizar el grupo
+async function saveGroupId(groupId) {
+  await supabase.from('groups').upsert([{ id: 1, group_id: groupId }])
+}
+
+// Leer el grupo
+async function loadGroupId() {
+  const { data } = await supabase
+    .from('groups')
+    .select('group_id')
+    .eq('id', 1)
+    .single()
+  return data ? data.group_id : null
+}
+
+// Añadir usuario privado
+async function addPrivateUser(userId) {
+  await supabase.from('users').upsert([{ user_id: userId }])
+}
+
+// Leer todos los usuarios privados
+async function getPrivateUsers() {
+  const { data } = await supabase.from('users').select('user_id')
+  return data ? data.map((u) => u.user_id) : []
+}
+
+// --- FIN FUNCIONES SUPABASE ---
+
+let GROUP_ID = null
+let privateUsers = new Set()
+
+// Cargar datos al iniciar
+;(async () => {
+  GROUP_ID = await loadGroupId()
+  privateUsers = new Set(await getPrivateUsers())
+})()
 
 // Registrar usuarios privados
 bot.start(async (ctx) => {
   if (ctx.chat.type === 'private') {
-    if (!privateUsers.has(ctx.from.id)) {
+    // Verifica en Supabase si el usuario ya existe
+    const { data } = await supabase
+      .from('users')
+      .select('user_id')
+      .eq('user_id', ctx.from.id)
+      .single()
+
+    if (!data) {
+      await addPrivateUser(ctx.from.id)
       privateUsers.add(ctx.from.id)
-      saveData({ groupId: GROUP_ID, privateUsers: Array.from(privateUsers) })
     }
-    ctx.reply(`Soy YummyEcho, repito los mensajes para ayudarte.`)
+
+    ctx.reply(
+      `Soy YummyEcho, repito los mensajes para ayudarte.`,
+      Markup.keyboard(['/pedido']).resize().oneTime(false)
+    )
   } else {
-    ctx.reply(`Soy YummyEcho, repito los mensajes para ayudarte.`)
+    ctx.reply(
+      `Soy YummyEcho, repito los mensajes para ayudarte.`,
+      Markup.keyboard(['/pedido']).resize().oneTime(false)
+    )
   }
 })
 
-let { groupId: GROUP_ID, privateUsers } = loadData()
-privateUsers = new Set(privateUsers)
-
-bot.on('new_chat_members', (ctx) => {
+bot.on('new_chat_members', async (ctx) => {
   const botId = ctx.botInfo.id
   const newMembers = ctx.message.new_chat_members
   const isBotAdded = newMembers.some((member) => member.id === botId)
 
   if (isBotAdded) {
     if (GROUP_ID !== ctx.chat.id) {
-      // Solo guarda si es diferente
       GROUP_ID = ctx.chat.id
-      saveData({ groupId: GROUP_ID, privateUsers: Array.from(privateUsers) })
+      await saveGroupId(GROUP_ID)
       console.log(`✅ Bot añadido al grupo. ID del grupo: ${GROUP_ID}`)
       ctx.reply(
         '¡Hola a todos! Gracias por añadirme. He guardado el ID de este grupo para mis tareas programadas.'
@@ -51,17 +104,6 @@ bot.on('new_chat_members', (ctx) => {
     }
   }
 })
-
-function loadData() {
-  if (fs.existsSync(DATA_FILE)) {
-    return JSON.parse(fs.readFileSync(DATA_FILE))
-  }
-  return { groupId: null, privateUsers: [] }
-}
-
-function saveData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2))
-}
 
 const groupEchoIntervals = {} // { [groupId]: { intervalId, message, minutes } }
 
@@ -139,11 +181,13 @@ bot.command('cadena', async (ctx) => {
   }
   const args = ctx.message.text.split(' ').slice(1)
   if (args.length < 1) {
-    return ctx.reply('Uso: /broadcast <mensaje>')
+    return ctx.reply('Uso: /cadena <mensaje>')
   }
   const message = args.join(' ')
   let count = 0
-  for (const userId of privateUsers) {
+  // Recarga usuarios privados desde Supabase
+  const users = await getPrivateUsers()
+  for (const userId of users) {
     try {
       await ctx.telegram.sendMessage(userId, `MENSAJE: ${message}`)
       count++
@@ -154,67 +198,141 @@ bot.command('cadena', async (ctx) => {
   ctx.reply(`Mensaje enviado a ${count} usuarios en privado.`)
 })
 
-bot.command('reporte', async (ctx) => {
-  if (ctx.chat.type !== 'private') {
-    return ctx.reply('Este comando solo puede usarse en privado.')
-  }
-  if (!GROUP_ID) {
+bot.hears(/^reporte\s+(.+)/i, async (ctx) => {
+  if (ctx.chat.type !== 'private') return
+  if (!GROUP_ID)
     return ctx.reply('No hay grupo registrado para enviar el reporte.')
-  }
 
-  // Si el mensaje es solo texto
-  const args = ctx.message.text.split(' ').slice(1)
-  if (args.length > 0) {
-    const text = args.join(' ')
-    await ctx.telegram.sendMessage(
-      GROUP_ID,
-      `Reporte de @${ctx.from.username || ctx.from.first_name}:\n${text}`
-    )
-    return ctx.reply('Tu reporte de texto ha sido enviado con éxito.')
-  }
+  const texto = ctx.match[1]
+  await ctx.telegram.sendMessage(
+    GROUP_ID,
+    `Reporte de @${ctx.from.username || ctx.from.first_name}:\n${texto}`
+  )
+  // Enviar confirmación al usuario
+  const confirmMsg = await ctx.reply(
+    'Tu reporte ha sido enviado con éxito. Por seguridad este mensaje se eliminará en 1 minuto.'
+  )
 
-  ctx.reply('Envía tu reporte junto al comando /reporte, en un mensaje.')
+  // Esperar un breve momento antes de borrar (opcional)
+  setTimeout(async () => {
+    try {
+      await ctx.deleteMessage() // Borra el mensaje del usuario
+      await ctx.telegram.deleteMessage(ctx.chat.id, confirmMsg.message_id) // Borra el mensaje del bot
+    } catch (err) {
+      console.error('Error al borrar mensajes:', err)
+    }
+  }, 60000) // Espera 1 minuto antes de borrar
 })
 
-// Permitir reporte con imagen/video y caption "/reporte ..."
+// Permitir reporte con imagen/video y caption que contenga "reporte"
 bot.on(['photo', 'video'], async (ctx) => {
   if (ctx.chat.type !== 'private') return
   if (!GROUP_ID) return
 
   const caption = ctx.message.caption || ''
-  if (!caption.startsWith('/reporte')) return
+  // Detectar si el caption contiene la palabra "reporte" (al inicio o en cualquier parte)
+  const reporteRegex = /^\/?reporte\b\s*(.*)/i
+  const match = caption.match(reporteRegex)
+  if (!match) return
 
-  // Extraer el texto después de "/reporte"
-  const text = caption.replace('/reporte', '').trim()
+  // Extraer el texto después de "reporte"
+  const text = match[1].trim()
   const user = ctx.from.username || ctx.from.first_name
   const finalCaption = text
     ? `Reporte de @${user}:\n${text}`
     : `Reporte de @${user}:`
 
-  if (ctx.message.photo) {
-    const photo = ctx.message.photo[ctx.message.photo.length - 1].file_id
-    await ctx.telegram.sendPhoto(GROUP_ID, photo, { caption: finalCaption })
-    return ctx.reply('Tu reporte con imagen ha sido enviado con éxito.')
-  }
+  let confirmMsg
 
-  if (ctx.message.video) {
-    const video = ctx.message.video.file_id
-    await ctx.telegram.sendVideo(GROUP_ID, video, { caption: finalCaption })
-    return ctx.reply('Tu reporte con video ha sido enviado con éxito.')
+  try {
+    if (ctx.message.photo) {
+      const photo = ctx.message.photo[ctx.message.photo.length - 1].file_id
+      await ctx.telegram.sendPhoto(GROUP_ID, photo, { caption: finalCaption })
+      confirmMsg = await ctx.reply(
+        'Tu reporte con imagen ha sido enviado con éxito. Por seguridad este mensaje se eliminará en 1 minuto.'
+      )
+    }
+
+    if (ctx.message.video) {
+      const video = ctx.message.video.file_id
+      await ctx.telegram.sendVideo(GROUP_ID, video, { caption: finalCaption })
+      confirmMsg = await ctx.reply(
+        'Tu reporte con video ha sido enviado con éxito. Por seguridad este mensaje se eliminará en 1 minuto.'
+      )
+    }
+
+    // Esperar un momento antes de borrar
+    setTimeout(async () => {
+      try {
+        await ctx.deleteMessage() // Borra el mensaje multimedia del usuario
+        if (confirmMsg) {
+          await ctx.telegram.deleteMessage(ctx.chat.id, confirmMsg.message_id) // Borra el mensaje del bot
+        }
+      } catch (err) {
+        console.error('Error al borrar mensajes:', err)
+      }
+    }, 60000) // Espera 1 minuto antes de borrar
+  } catch (err) {
+    console.error('Error al procesar el reporte:', err)
   }
+})
+
+// Lista de pedidos random
+const pedidos = [
+  {
+    producto: "Mc Flurry de McDonald's",
+    ubicacion: 'Entra a la app para ver la ubicación',
+    cliente: 'Francisco Rodríguez',
+    bonus: '2$',
+  },
+  {
+    producto: "Pizza de Domino's tamaño mediana",
+    ubicacion: 'Entra a la app para ver la ubicación',
+    cliente: 'Ana Pérez',
+    bonus: '1.5$',
+  },
+  {
+    producto: 'Sushi de Sushi House',
+    ubicacion: 'Entra a la app para ver la ubicación',
+    cliente: 'Carlos Ruiz',
+    bonus: '3$',
+  },
+  {
+    producto: 'Tacos de Taco Bell',
+    ubicacion: 'Entra a la app para ver la ubicación',
+    cliente: 'María Gómez',
+    bonus: '2.2$',
+  },
+]
+
+// Comando /pedido
+bot.command('pedido', (ctx) => {
+  const pedido = pedidos[Math.floor(Math.random() * pedidos.length)]
+  ctx.reply(
+    `🍔 Pedido:\n` +
+      `Producto: ${pedido.producto}\n` +
+      `${pedido.ubicacion}\n` +
+      `Cliente: ${pedido.cliente}\n` +
+      `Bonus: ${pedido.bonus}`
+  )
 })
 
 bot.help((ctx) => {
-  ctx.reply('En desarollo...')
+  ctx.reply('En desarrollo...')
 })
 
-//mensaje de prueba, borrar despues
-bot.command('grupo_id', async (ctx) => {
-  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
-    return ctx.reply('Este comando solo puede usarse en un grupo.')
+//Revisar cuantos usuarios hay actualmente en el bot
+bot.command('usuarios', async (ctx) => {
+  if (!(await isAdminOrOwner(ctx))) {
+    return ctx.reply(
+      'Solo administradores o propietarios pueden usar este comando.'
+    )
   }
-  GROUP_ID = ctx.chat.id
-  ctx.reply(`ID de grupo guardado (testeo): ${GROUP_ID}`)
+  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
+    return ctx.reply('Este comando solo puede usarse en grupos.')
+  }
+  const users = await getPrivateUsers()
+  ctx.reply(`Usuarios registrados en privado: ${users.length}`)
 })
 
 bot.launch()
