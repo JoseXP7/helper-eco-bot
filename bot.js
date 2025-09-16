@@ -21,12 +21,40 @@ app.listen(port, () => {
 
 const tokenBot = process.env.TELEGRAM_TOKEN
 const bot = new Telegraf(tokenBot)
+const GROUP_PASSWORD = process.env.GROUP_PASSWORD
+
+const activatedGroups = new Set()
 
 // --- NUEVAS FUNCIONES SUPABASE ---
 
 // Guardar o actualizar el grupo
 async function saveGroupId(groupId) {
   await supabase.from('groups').upsert([{ id: 1, group_id: groupId }])
+}
+
+// Guardar o actualizar el grupo, incluyendo el estado de activación
+async function saveGroupStatus(groupId, isActivated) {
+  const { data, error } = await supabase
+    .from('groups')
+    .upsert([{ group_id: groupId, is_activated: isActivated }], {
+      onConflict: 'group_id',
+    })
+
+  if (error) {
+    console.error('Error al guardar el estado del grupo:', error.message)
+    throw error // Propaga el error para manejarlo en la llamada
+  }
+  return data
+}
+
+// Leer el estado de un grupo
+async function loadGroupStatus(groupId) {
+  const { data } = await supabase
+    .from('groups')
+    .select('is_activated')
+    .eq('group_id', groupId)
+    .single()
+  return data ? data.is_activated : false
 }
 
 // Leer el grupo
@@ -39,9 +67,41 @@ async function loadGroupId() {
   return data ? data.group_id : null
 }
 
-// Añadir usuario privado
-async function addPrivateUser(userId) {
-  await supabase.from('users').upsert([{ user_id: userId }])
+// Guardar o actualizar el estado de un usuario
+async function saveUserStatus(userId, isActivated) {
+  const { data, error } = await supabase
+    .from('users')
+    .update({ is_activated: isActivated })
+    .eq('user_id', userId)
+
+  if (error) {
+    console.error('Error al actualizar el estado del usuario:', error.message)
+    throw error
+  }
+  return data
+}
+
+// Leer el estado de un usuario
+async function loadUserStatus(userId) {
+  const { data } = await supabase
+    .from('users')
+    .select('is_activated')
+    .eq('user_id', userId)
+    .single()
+  return data ? data.is_activated : false
+}
+
+// Añadir usuario privado o actualizar si ya existe
+async function upsertPrivateUser(userId) {
+  const { data, error } = await supabase
+    .from('users')
+    .upsert([{ user_id: userId, is_activated: false }], {
+      onConflict: 'user_id',
+    })
+  if (error) {
+    console.error('Error al guardar el usuario privado:', error.message)
+  }
+  return data
 }
 
 // Leer todos los usuarios privados
@@ -59,7 +119,74 @@ let privateUsers = new Set()
 ;(async () => {
   GROUP_ID = await loadGroupId()
   privateUsers = new Set(await getPrivateUsers())
+
+  // Cargar todos los grupos activados al iniciar
+  const { data: activated } = await supabase
+    .from('groups')
+    .select('group_id')
+    .eq('is_activated', true)
+  if (activated) {
+    activated.forEach((row) => activatedGroups.add(row.group_id))
+  }
 })()
+
+// Middleware para verificar la activación del usuario privado
+bot.use(async (ctx, next) => {
+  // Solo aplica para chats privados
+  if (ctx.chat.type !== 'private') {
+    return next()
+  }
+
+  // Comandos públicos en privado que no requieren activación
+  const publicCommands = ['/start', '/solicitar_activacion', '/help', '/pedido']
+  if (
+    ctx.message &&
+    ctx.message.text &&
+    publicCommands.includes(ctx.message.text.split(' ')[0])
+  ) {
+    return next()
+  }
+
+  // Verificar el estado de activación del usuario
+  const isActivated = await loadUserStatus(ctx.from.id)
+  if (isActivated) {
+    return next()
+  } else {
+    ctx.reply(
+      '❌ No tienes permiso para usar este comando. Por favor, usa /solicitar_activacion para pedir acceso.'
+    )
+  }
+})
+
+// Middleware para verificar si el grupo está activado
+bot.use(async (ctx, next) => {
+  // Si es un chat privado, siempre pasa
+  if (ctx.chat.type === 'private') {
+    return next()
+  }
+
+  // ✅ Permitir el comando /password y /start sin importar el estado de activación
+  if (ctx.message && ctx.message.text) {
+    if (
+      ctx.message.text.startsWith('/password') ||
+      ctx.message.text.startsWith('/start')
+    ) {
+      return next()
+    }
+  }
+
+  // ✅ Verificar el estado de activación del grupo directamente desde la base de datos
+  const isActivated = await loadGroupStatus(ctx.chat.id)
+  if (isActivated) {
+    activatedGroups.add(ctx.chat.id) // Sincroniza el estado en memoria
+    return next()
+  }
+
+  // Si no está activado, se informa al usuario y se detiene la ejecución
+  ctx.reply(
+    'El bot no está activado en este grupo. Un administrador debe ingresar la contraseña con el comando `/password <tu_contraseña>`'
+  )
+})
 
 // Registrar usuarios privados
 bot.start(async (ctx) => {
@@ -72,7 +199,7 @@ bot.start(async (ctx) => {
       .single()
 
     if (!data) {
-      await addPrivateUser(ctx.from.id)
+      await upsertPrivateUser(ctx.from.id)
       privateUsers.add(ctx.from.id)
     }
 
@@ -81,6 +208,12 @@ bot.start(async (ctx) => {
       Markup.keyboard(['/pedido']).resize().oneTime(false)
     )
   } else {
+    const isActivated = await loadGroupStatus(ctx.chat.id)
+    if (!isActivated) {
+      return ctx.reply(
+        'Para usarme en este grupo, por favor ingresa la contraseña con el comando `/password <tu_contraseña>`'
+      )
+    }
     ctx.reply(
       `Soy YummyEcho, repito los mensajes para ayudarte.`,
       Markup.keyboard(['/pedido']).resize().oneTime(false)
@@ -94,14 +227,60 @@ bot.on('new_chat_members', async (ctx) => {
   const isBotAdded = newMembers.some((member) => member.id === botId)
 
   if (isBotAdded) {
-    if (GROUP_ID !== ctx.chat.id) {
-      GROUP_ID = ctx.chat.id
-      await saveGroupId(GROUP_ID)
-      console.log(`✅ Bot añadido al grupo. ID del grupo: ${GROUP_ID}`)
+    // ✅ Se simplifica la lógica, se basa en la DB y el middleware
+    const isActivated = await loadGroupStatus(ctx.chat.id)
+    if (isActivated) {
+      activatedGroups.add(ctx.chat.id)
+      return ctx.reply('¡Hola de nuevo! Ya estoy activado en este grupo.')
+    }
+
+    ctx.reply(
+      '¡Hola a todos! Para activar mis funciones en este grupo, el propietario o un administrador debe ingresar la contraseña. Por favor, usa el comando `/password <tu_contraseña>`'
+    )
+  }
+})
+
+// Nuevo comando para ingresar la contraseña
+bot.command('password', async (ctx) => {
+  const groupId = ctx.chat.id
+  const args = ctx.message.text.split(' ').slice(1)
+  const password = args[0]
+
+  if (!(await isAdminOrOwner(ctx))) {
+    return ctx.reply(
+      'Solo los administradores o propietarios pueden activar el bot.'
+    )
+  }
+
+  const isActivated = await loadGroupStatus(groupId)
+  if (isActivated) {
+    return ctx.reply('Este grupo ya está activado.')
+  }
+
+  if (password === GROUP_PASSWORD) {
+    // ✅ Aquí está la clave para solucionar el error 400
+    try {
+      await saveGroupStatus(groupId, true)
+      activatedGroups.add(groupId)
+
       ctx.reply(
-        '¡Hola a todos! Gracias por añadirme. He guardado el ID de este grupo para mis tareas programadas.'
+        '✅ ¡Contraseña correcta! El bot ha sido activado en este grupo. Ahora puedes usar mis comandos.'
+      )
+
+      // La lógica de `saveGroupId` debe ser independiente si tienes un ID principal
+      // o usar el mismo upsert en la tabla de grupos. Si `GROUP_ID` no es esencial
+      // para tu lógica actual, podrías eliminar estas líneas.
+      GROUP_ID = groupId
+      await saveGroupId(GROUP_ID)
+      console.log(`✅ Bot activado en el grupo.`)
+    } catch (e) {
+      console.error('Error al activar el grupo:', e)
+      ctx.reply(
+        '❌ Ocurrió un error al activar el grupo. Por favor, revisa los logs del servidor.'
       )
     }
+  } else {
+    ctx.reply('❌ Contraseña incorrecta. Por favor, inténtalo de nuevo.')
   }
 })
 
@@ -229,6 +408,13 @@ bot.on(['photo', 'video'], async (ctx) => {
   if (ctx.chat.type !== 'private') return
   if (!GROUP_ID) return
 
+  const isActivated = await loadUserStatus(ctx.from.id)
+  if (!isActivated) {
+    return ctx.reply(
+      '❌ No tienes permiso para usar este comando. Por favor, usa /solicitar_activacion para pedir acceso.'
+    )
+  }
+
   const caption = ctx.message.caption || ''
   // Detectar si el caption contiene la palabra "reporte" (al inicio o en cualquier parte)
   const reporteRegex = /^\/?reporte\b\s*(.*)/i
@@ -307,13 +493,60 @@ const pedidos = [
 
 // Comando /pedido
 bot.command('pedido', (ctx) => {
-  const pedido = pedidos[Math.floor(Math.random() * pedidos.length)]
+  // 50% de probabilidad de encontrar un pedido
+  const foundPedido = Math.random() < 0.5
+
+  if (foundPedido) {
+    const pedido = pedidos[Math.floor(Math.random() * pedidos.length)]
+    ctx.reply(
+      `🍔 ¡Nuevo Pedido Disponible!\n\n` +
+        `Producto: ${pedido.producto}\n` +
+        `Ubicación: ${pedido.ubicacion}\n` +
+        `Cliente: ${pedido.cliente}\n` +
+        `Bonus: ${pedido.bonus}\n\n` +
+        `¿Deseas aceptar este pedido?`,
+      // ✅ Añade el teclado en línea con botones
+      Markup.inlineKeyboard([
+        Markup.button.callback('✅ Aceptar', 'accept_order'),
+        Markup.button.callback('❌ Rechazar', 'reject_order'),
+      ])
+    )
+  } else {
+    ctx.reply(
+      '😞 No se encontraron pedidos disponibles en tu zona. Sigue intentando.'
+    )
+  }
+})
+
+// Manejador de la acción 'Aceptar'
+bot.action('accept_order', (ctx) => {
+  // Edita el mensaje original para mostrar la confirmación
+  ctx.editMessageText(
+    '✅ ¡Pedido aceptado! El restaurante ha sido notificado y el pedido se ha añadido a tu ruta, revisa la app para más detalles.'
+  )
+})
+
+// Manejador de la acción 'Rechazar'
+bot.action('reject_order', (ctx) => {
+  // Edita el mensaje original para mostrar la confirmación
+  ctx.editMessageText('❌ Pedido rechazado. Intenta de nuevo más tarde.')
+})
+
+bot.command('ganancias', (ctx) => {
+  // Generar un número de entregas entre 1 y 12
+  const entregas = Math.floor(Math.random() * 12) + 1
+
+  // Generar ganancia total entre 15.00$ y 35.00$
+  const gananciaTotal = (Math.random() * (35 - 15) + 15).toFixed(2)
+
+  // Generar bonus semanal entre 1.00$ y 5.00$
+  const bonusSemanal = (Math.random() * (5 - 1) + 1).toFixed(2)
+
   ctx.reply(
-    `🍔 Pedido:\n` +
-      `Producto: ${pedido.producto}\n` +
-      `${pedido.ubicacion}\n` +
-      `Cliente: ${pedido.cliente}\n` +
-      `Bonus: ${pedido.bonus}`
+    `💰 Tus ganancias de hoy:\n\n` +
+      `Entregas completadas: ${entregas}\n` +
+      `Ganancia total: ${gananciaTotal}$\n` +
+      `Bonus de la semana: ${bonusSemanal}$`
   )
 })
 
@@ -323,16 +556,106 @@ bot.help((ctx) => {
 
 //Revisar cuantos usuarios hay actualmente en el bot
 bot.command('usuarios', async (ctx) => {
+  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
+    return ctx.reply('Este comando solo puede usarse en grupos.')
+  }
   if (!(await isAdminOrOwner(ctx))) {
     return ctx.reply(
       'Solo administradores o propietarios pueden usar este comando.'
     )
   }
-  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
-    return ctx.reply('Este comando solo puede usarse en grupos.')
-  }
   const users = await getPrivateUsers()
   ctx.reply(`Usuarios registrados en privado: ${users.length}`)
+})
+
+// Nuevo comando para solicitar activación
+bot.command('solicitar_activacion', async (ctx) => {
+  if (ctx.chat.type !== 'private') {
+    return ctx.reply(
+      'Este comando solo puede ser usado en un chat privado con el bot.'
+    )
+  }
+
+  const userId = ctx.from.id
+  let confirmMsg
+
+  try {
+    // Guarda el objeto del mensaje enviado para obtener su ID
+    confirmMsg = await ctx.reply(
+      `Tu ID de usuario es: <code>${userId}</code>\n\nPor favor, reenvía este ID al administrador para que pueda activarte.`,
+      { parse_mode: 'HTML' }
+    )
+
+    // Programa la eliminación del mensaje después de 1 minuto (60000 ms)
+    setTimeout(async () => {
+      try {
+        // Elimina el mensaje del bot usando el ID guardado
+        await ctx.telegram.deleteMessage(ctx.chat.id, confirmMsg.message_id)
+      } catch (err) {
+        console.error('Error al borrar el mensaje de activación:', err)
+      }
+    }, 60000)
+  } catch (e) {
+    console.error('Error al procesar la solicitud de activación:', e)
+    ctx.reply(
+      '❌ Ocurrió un error al procesar tu solicitud. Inténtalo de nuevo más tarde.'
+    )
+  }
+})
+
+// Nuevo comando para activar usuarios. Solo para uso en grupos y por admins.
+bot.command('activar', async (ctx) => {
+  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
+    return ctx.reply(
+      'Este comando solo puede ser usado en grupos por un administrador.'
+    )
+  }
+
+  if (!(await isAdminOrOwner(ctx))) {
+    return ctx.reply(
+      '❌ Solo los administradores o propietarios pueden activar usuarios.'
+    )
+  }
+
+  const args = ctx.message.text.split(' ').slice(1)
+  const userId = args[0]
+
+  if (!userId || isNaN(userId)) {
+    return ctx.reply(
+      '❌ Uso incorrecto. Por favor, proporciona el ID de usuario. Ejemplo: `/activar 12345678`'
+    )
+  }
+
+  try {
+    const userStatus = await loadUserStatus(parseInt(userId))
+    if (userStatus) {
+      return ctx.reply('✅ Este usuario ya está activado.')
+    }
+
+    await saveUserStatus(parseInt(userId), true)
+    ctx.reply(`✅ Usuario con ID \`${userId}\` activado correctamente.`)
+
+    // Enviar notificación al usuario activado
+    try {
+      await ctx.telegram.sendMessage(
+        userId,
+        '🎉 ¡Felicidades! Has sido activado y ahora eres un repartidor verificado.'
+      )
+    } catch (e) {
+      console.error(
+        `Error al enviar mensaje de activación al usuario ${userId}:`,
+        e.message
+      )
+      ctx.reply(
+        `⚠️ Se activó al usuario ${userId}, pero no se le pudo enviar el mensaje de confirmación. Puede que haya bloqueado el bot o no existe ese chat.`
+      )
+    }
+  } catch (e) {
+    console.error('Error al activar usuario:', e)
+    ctx.reply(
+      '❌ Ocurrió un error al activar el usuario. Por favor, asegúrate de que el ID sea correcto y que el usuario haya iniciado un chat con el bot.'
+    )
+  }
 })
 
 bot.launch()
