@@ -204,7 +204,7 @@ bot.start(async (ctx) => {
     }
 
     ctx.reply(
-      `Soy YummyEcho, repito los mensajes para ayudarte.`,
+      `Soy Yummy Helper, un bot para revisar pedidos de nuestra app fácil y rápido.`,
       Markup.keyboard(['/pedido']).resize().oneTime(false)
     )
   } else {
@@ -215,7 +215,7 @@ bot.start(async (ctx) => {
       )
     }
     ctx.reply(
-      `Soy YummyEcho, repito los mensajes para ayudarte.`,
+      `Soy Yummy Helper, un bot para revisar pedidos de nuestra app fácil y rápido.`,
       Markup.keyboard(['/pedido']).resize().oneTime(false)
     )
   }
@@ -246,6 +246,10 @@ bot.command('password', async (ctx) => {
   const args = ctx.message.text.split(' ').slice(1)
   const password = args[0]
 
+  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
+    return
+  }
+
   if (!(await isAdminOrOwner(ctx))) {
     return ctx.reply(
       'Solo los administradores o propietarios pueden activar el bot.'
@@ -258,7 +262,6 @@ bot.command('password', async (ctx) => {
   }
 
   if (password === GROUP_PASSWORD) {
-    // ✅ Aquí está la clave para solucionar el error 400
     try {
       await saveGroupStatus(groupId, true)
       activatedGroups.add(groupId)
@@ -267,9 +270,6 @@ bot.command('password', async (ctx) => {
         '✅ ¡Contraseña correcta! El bot ha sido activado en este grupo. Ahora puedes usar mis comandos.'
       )
 
-      // La lógica de `saveGroupId` debe ser independiente si tienes un ID principal
-      // o usar el mismo upsert en la tabla de grupos. Si `GROUP_ID` no es esencial
-      // para tu lógica actual, podrías eliminar estas líneas.
       GROUP_ID = groupId
       await saveGroupId(GROUP_ID)
       console.log(`✅ Bot activado en el grupo.`)
@@ -297,6 +297,9 @@ async function isAdminOrOwner(ctx) {
 }
 
 bot.command('eco', async (ctx) => {
+  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
+    return
+  }
   if (!(await isAdminOrOwner(ctx))) {
     return ctx.reply(
       'Solo administradores o propietarios pueden usar este comando.'
@@ -334,6 +337,9 @@ bot.command('eco', async (ctx) => {
 })
 
 bot.command('eco_stop', async (ctx) => {
+  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
+    return
+  }
   if (!(await isAdminOrOwner(ctx))) {
     return ctx.reply(
       'Solo administradores o propietarios pueden usar este comando.'
@@ -350,13 +356,13 @@ bot.command('eco_stop', async (ctx) => {
 })
 
 bot.command('cadena', async (ctx) => {
+  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
+    return
+  }
   if (!(await isAdminOrOwner(ctx))) {
     return ctx.reply(
       'Solo administradores o propietarios pueden usar este comando.'
     )
-  }
-  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
-    return ctx.reply('Este comando solo puede usarse en grupos.')
   }
   const args = ctx.message.text.split(' ').slice(1)
   if (args.length < 1) {
@@ -550,14 +556,84 @@ bot.command('ganancias', (ctx) => {
   )
 })
 
+// Comando /mi_rating
+bot.command('mi_rating', (ctx) => {
+  // Genera un rating entre 4.0 y 5.0
+  const rating = (Math.random() * (5.0 - 4.0) + 4.0).toFixed(1)
+
+  // Genera un número de reseñas (simulando actividad)
+  const totalReviews = Math.floor(Math.random() * 500) + 150
+
+  ctx.reply(
+    `⭐ Tu Calificación de Repartidor:\n\n` +
+      `Puntuación Actual: ${rating} / 5.0\n` +
+      `Reseñas Positivas (últimos 30 días): ${Math.floor(
+        totalReviews * 0.95
+      )}\n` +
+      `Reseñas Totales: ${totalReviews}\n\n` +
+      `Sigue ofreciendo un excelente servicio para mantener tu puntaje alto.`
+  )
+})
+
+bot.command('reglas', (ctx) => {
+  ctx.reply(
+    `📜 <b>Normativas Clave de Yummy</b>:\n\n` +
+      `1. <b>Vestimenta</b>: Siempre usa tu chaleco oficial durante las entregas.\n` +
+      `2. <b>Tiempo</b>: Tienes 5 minutos para iniciar la ruta después de aceptar un pedido.\n` +
+      `3. <b>Cancelación</b>: La cancelación por el driver solo está permitida con evidencia fotográfica (restaurante cerrado, inundación, etc.).\n\n` +
+      `<i>Consulta la sección 'Soporte' en la app para el manual completo de políticas y procedimientos.</i>`,
+    { parse_mode: 'HTML' }
+  )
+})
+
+bot.command('ruta', (ctx) => {
+  const mensajes = [
+    '📍 Tienes <b>1.2 km restantes</b> para la recogida en "El Buen Sabor".',
+    '🗺️ Próxima parada de entrega: <b>Av. Principal, casa #14</b>. El cliente te espera.',
+    '🚧 Tómate un descanso. Tu próxima asignación llegará pronto.',
+  ]
+  const mensajeRuta = mensajes[Math.floor(Math.random() * mensajes.length)]
+
+  ctx.reply(mensajeRuta, { parse_mode: 'HTML' })
+})
+
+bot.command('tienda', (ctx) => {
+  ctx.reply(
+    `🏪 <b>Consulta Rápida de Puntos de Recogida (Barquisimeto)</b>:\n\n` +
+      `• <b>La Hamburguesería 143 (Av. Lara)</b>: Abierto. Tiempo de espera: 8 min. (Alta demanda)\n` +
+      `• <b>Ono Sushi Bar (Torre Milenium, Av. Los Leones)</b>: Abierto. Tiempo de espera: 5 min. (Recepción rápida)\n` +
+      `• <b>Tiuna Grill Steak House (C.C. Sambil)</b>: Cerrado. Solo abre después de las 5:00 PM.\n` +
+      `• <b>Pippo Trattoria (C.C. Ciudad Llanero)</b>: Abierto. Tiempo de espera: 15 min. (Inventario en curso)\n` +
+      `• <b>Maranello (Av. Lara, C.C. Churu Meru)</b>: Abierto. Flujo normal.\n\n` +
+      `<i>*El sistema te asignará automáticamente al restaurante más cercano con pedido.*</i>`,
+    { parse_mode: 'HTML' }
+  )
+})
+
 bot.help((ctx) => {
-  ctx.reply('En desarrollo...')
+  ctx.reply(
+    `🛠️ <b>Menú de Ayuda para Repartidores (Yummy Helper)</b>\n\n` +
+      `Aquí tienes la lista de comandos disponibles para gestionar tus entregas y tu cuenta:\n\n` +
+      // --- Gestión de Pedidos y Logística ---
+      `<b>📦 Logística y Rutas</b>\n` +
+      `• /pedido: Busca un nuevo pedido disponible en tu zona (con botones Aceptar/Rechazar).\n` +
+      `• /ruta: Consulta la información de tu próxima parada o la situación de tu entrega actual.\n` +
+      `• /tienda: Revisa el estatus de apertura y el tiempo de espera en restaurantes clave de la ciudad.\n\n` +
+      // --- Finanzas y Perfil ---
+      `<b>📊 Finanzas y Perfil</b>\n` +
+      `• /ganancias: Muestra un resumen de tus ganancias de hoy (entregas y bonus).\n` +
+      `• /mi_rating: Revisa tu calificación actual de servicio y el número de reseñas.\n\n` +
+      // --- Herramientas de Soporte ---
+      `<b>⚙️ Herramientas de Soporte</b>\n` +
+      `• /reglas: Muestra un extracto de las normativas clave de la plataforma Yummy.`,
+    { parse_mode: 'HTML' }
+  )
 })
 
 //Revisar cuantos usuarios hay actualmente en el bot
 bot.command('usuarios', async (ctx) => {
   if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
-    return ctx.reply('Este comando solo puede usarse en grupos.')
+    return
   }
   if (!(await isAdminOrOwner(ctx))) {
     return ctx.reply(
@@ -606,9 +682,7 @@ bot.command('solicitar_activacion', async (ctx) => {
 // Nuevo comando para activar usuarios. Solo para uso en grupos y por admins.
 bot.command('activar', async (ctx) => {
   if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
-    return ctx.reply(
-      'Este comando solo puede ser usado en grupos por un administrador.'
-    )
+    return
   }
 
   if (!(await isAdminOrOwner(ctx))) {
